@@ -10,3 +10,6 @@ jobs/*
 *.pth
 wandb*
 results/*
+
+# Local model bundles and experiment outputs
+/weights/

@@ -140,6 +140,83 @@ IMC22 :'):
 | Tiny RoMa v1    | 42.2 |
 | RoMa    |  -   |
 
+## Query-point wrapper for Tiny RoMa (this fork)
+
+`TinyRoMaQueryMatcher` composes an existing Tiny RoMa instance with a query-point
+interface. It samples the dense warp at **your existing left-image points** and
+returns right-image coordinates in the same order. It does not detect a separate
+right-image keypoint set, associate nearest keypoints, or change the model.
+
+```python
+import torch
+from romatch import tiny_roma_v1_outdoor
+from romatch.query_matcher import TinyRoMaQueryMatcher
+
+model = tiny_roma_v1_outdoor(device="mps")  # also CPU or CUDA
+matcher = TinyRoMaQueryMatcher(model, confidence_threshold=0.5)
+# Images: RGB float32 tensors [1,3,H,W], values in [0,1], on model.device.
+# Points: floating tensor [N,2] in original left-image pixel coordinates.
+left_points = torch.tensor([[120.25, 80.5], [300.0, 200.0]], device=model.device)
+result = matcher.match(left_image, right_image, left_points)
+right_points = result.right_points       # [N,2], original right-image pixels
+confidence = result.confidence           # [N], forward model score
+valid = result.valid                     # [N], combined acceptance mask
+```
+
+- All input queries retain their output slot, including invalid queries; use
+  `result.valid` before triangulation. Nonfinite/out-of-bounds predictions are
+  rejected. Empty query sets return empty results without running the model.
+- Each stereo pair uses one forward model call. Default filtering requires
+  confidence ≥0.5; this is configurable and is a choice for this fork’s
+  experiments, not a prescribed Tiny RoMa threshold. No vertical/epipolar
+  filtering is applied.
+- Optional `left_mask` / `right_mask` are boolean `[H,W]` tensors on the image
+  device, with `True=allowed`. They conservatively filter queries and endpoints;
+  pixels given to the model remain unchanged. These are not attention masks.
+- Coordinates use zero-based pixel centres: normalize with `(pixel+0.5)*2/size-1`
+  and invert with `(normalized+1)*size/2-0.5`. This convention differs by half a
+  pixel from upstream's `to_pixel_coordinates()` helper; do not mix conventions.
+- `sample_query_points(warp, certainty, points, source_size, target_size)` also
+  exposes the sampling step independently. Sizes are `(height,width)`. It takes a
+  **directional** `[H,W,4]` warp, not full RoMa's concatenated symmetric output.
+- The wrapper has no temporal state, track IDs, keyframe logic or triangulation.
+  Load the model once and reuse it. Outputs remain on the input device.
+- CPU and Apple MPS query sampling are tested. TensorRT/ONNX export is not
+  implemented or validated by this wrapper.
+
+### Stereo video demo
+
+From this repository, run:
+
+```sh
+uv sync --extra demo
+PYTORCH_ENABLE_MPS_FALLBACK=1 uv run --extra demo python -m demo.demo_query_video \
+  --video /path/to/stereo_sbs.mp4 \
+  --masks /path/to/masks \
+  --device mps --stride 30 --output results/tiny-query-video
+```
+
+The default model factory downloads official weights if needed. For the pinned
+local test bundle, add `--weights-dir weights` (containing
+`tiny_roma_v1_outdoor.pth`, `xfeat.pt` and `xfeat_model.py`). Model files and results
+are ignored by Git. The optional `demo` extra supplies the H.264 encoder.
+
+The demo splits the encoded stereo pair, resizes each eye to 960×540, and uses a
+40×24 grid filtered by the saved masks. It writes a connecting-line video, all
+query predictions, validity/confidence arrays, timings and provenance.
+Colours identify pairs, not confidence. The selected points are not evidence of
+correct disparity without ground truth.
+
+Run the focused tests with:
+
+```sh
+uv run python -m unittest discover -s tests -p test_query_matcher.py -v
+```
+
+Tests cover pixel-centre conventions, subpixel interpolation, unequal image/field
+sizes, image boundaries, masks, confidence rejection, empty inputs,
+query ordering and CPU/MPS agreement (MPS check skips if unavailable).
+
 ## Reproducibility
 There are a few diffs in the current codebase compared to the original repo used to run experiments.
 
